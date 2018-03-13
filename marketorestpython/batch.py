@@ -113,8 +113,23 @@ class MarketoClientBatch(MarketoClient):
         if table is None:
             table = 'leads'
 
+        if fields is None:
+            if table == 'leads':
+                resp = super().describe()
 
-
+                field_md = []
+                fields = []
+                for r in resp:
+                    field = {}
+                    field['name'] = r['displayName']
+                    field['api'] = r['rest']['name']
+                    field['type'] = r['dataType']
+                    if 'length' in r:
+                        field['length'] = r['length']
+                    field_md.append(field)
+                    if field['api'][-3:] != '__c':
+                        fields.append(field['api'])
+                
         batch_label = '{} : {} <-> {}'.format(table, start_dt, end_dt)
 
         if self.API_DAYS_MAX is None:
@@ -164,8 +179,9 @@ class MarketoClientBatch(MarketoClient):
                 'end': step_dt,
                 'filter': filter
             }
+            print(filter)
             
-            response = self.execute('create_bulk_extract', table=table, filter=filter)
+            response = self.execute('create_bulk_extract', table=table, filter=filter, fields=fields)
 
             # we have a response...
             for result in response:
@@ -225,9 +241,13 @@ class MarketoClientBatch(MarketoClient):
         status = 'Created,Queued,Processing,Cancelled,Completed,Failed'
         
         response = self.execute('get_bulk_jobs', table=table, status=status)
-        print(response)
-        for result in response:
-            print(result)
+
+        if 'result' in response:
+            
+            for result in response['result']:
+                print(result)
+
+        return response
 
     # --------- BULK EXTRACT ---------
     def create_bulk_extract(self, table=None, fields=None, filter=None, format=None, column_header=None):
@@ -235,10 +255,11 @@ class MarketoClientBatch(MarketoClient):
         args = {
             'access_token': self.token
         }
+        body = {}
         if table is None:
             table = 'leads'
         if fields is not None:
-            args['fields'] = fields
+            body['fields'] = fields
         if column_header is not None:
             args['columnHeaderNames'] = column_header
         if filter is None:
@@ -247,12 +268,12 @@ class MarketoClientBatch(MarketoClient):
             filter = {
             "createdAt": isodate
             }    
-        args['filter'] = filter
+        body['filter'] = filter
         if format is None:
             format='CSV'
-        args['format'] = format
+        body['format'] = format
         if table.lower == 'leads' and fields is None: raise ValueError("Required argument 'fields' is none.")
-        result = self._api_call('post', self.host + "/bulk/v1/" + table + "/export/create.json", args)
+        result = self._api_call('post', self.host + "/bulk/v1/" + table + "/export/create.json", args, data=body)
         if result is None: raise Exception("Empty Response")
         if not result['success'] : raise MarketoException(result['errors'][0])
         return result['result']
@@ -289,9 +310,10 @@ class MarketoClientBatch(MarketoClient):
         args = {
             'access_token': self.token
         }
+
         if table is None:
             table = 'leads'
-        result = self._api_call('get', self.host + "/bulk/v1/" + table + "/export/" + export_id + "/enqueue.json", args)
+        result = self._api_call('post', self.host + "/bulk/v1/" + table + "/export/" + export_id + "/enqueue.json", args)
         if result is None: raise Exception("Empty Response")
         if not result['success'] : raise MarketoException(result['errors'][0])
         return result['result']
