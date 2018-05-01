@@ -20,20 +20,34 @@ class MarketoClientBatch(MarketoClient):
         # init the batch frameworks...
         self.API_DAYS_MAX = api_days_max
         self.API_SIZE_LIMIT = api_size_limit
+        self.API_MAX_QUEUE = 9
+        self.API_QUEUE_COUNT = self.API_MAX_QUEUE
         self.data = {}
         self._name = self.__class__.__name__ #name
-        self._pickleName = "{}_batch.pickle".format(self._name)
+        self._pickleName = "{}_{}_batch.pickle".format(self._name, munchkin_id)
 
     def _api_call(self, method, endpoint, *args, **kwargs):
         request = HttpLib()
         print('Request:{}\n\t{}\n\t{}'.format(method, endpoint, *args))
         result = getattr(request, method)(endpoint, *args, **kwargs)
-        print('Result: {}'.format(result))
         self.API_CALLS_MADE += 1
         if self.API_LIMIT and self.API_CALLS_MADE >= self.API_LIMIT:
             raise Exception({'message': '# of API Calls exceeded the limit as specified in the Python script: '
                                         + str(self.API_LIMIT), 'code': '416'})
         return result
+
+    def _download_file(self, url, file_name):
+        import requests
+        
+        chunk_size = 8096
+
+        response = requests.get(url, stream=True)
+        bytes_transferred = 0
+        with open(file_name, 'wb') as file_handle:
+            for chunk in response.iter_content(chunk_size):
+                file_handle.write(chunk)
+                bytes_transferred += len(chunk)
+        return bytes_transferred
 
     def execute(self, method, *args, **kargs):
         ''' 
@@ -46,7 +60,7 @@ class MarketoClientBatch(MarketoClient):
         '''
             max 10 rechecks
         '''
-        for i in range(0,10):
+        for _ in range(0,10):
             try:
 
                 method_map={
@@ -130,10 +144,10 @@ class MarketoClientBatch(MarketoClient):
                     if field['api'][-3:] != '__c':
                         fields.append(field['api'])
                 
-        batch_label = '{} : {} <-> {}'.format(table, start_dt, end_dt)
+        batch_label = '{}:{}:{}'.format(table.lower(), start_dt.date(), end_dt.date())
 
         if self.API_DAYS_MAX is None:
-            self.API_DAYS_MAX = 31
+            self.API_DAYS_MAX = 30
         
         # set up the data...
         if 'requests' not in self.data:
@@ -163,8 +177,8 @@ class MarketoClientBatch(MarketoClient):
             if step_dt > end_dt:
                 step_dt = end_dt
 
-            step_label = '{}: {} <-> {}'.format(table, start_dt, step_dt)
-        
+            step_label = '{}:{}:{}'.format(table.lower(), start_dt.date(), step_dt.date())
+
             if step_label in self.data['batches']:
                 print('Skipping already requested....')
                 continue
@@ -196,22 +210,18 @@ class MarketoClientBatch(MarketoClient):
                     }                
                 '''
                 export_id = result['exportId']
-                status = result['status']
                 self.data['batches'][step_label]['export_id'] = export_id
 
                 if export_id not in self.data:
                     self.data[export_id] = {}
-                    self.data[export_id]['create'] = []
+                    self.data[export_id]['calls'] = []
 
                 result['startAt'] = start_dt
-                result['endAt'] = end_dt
+                result['endAt'] = step_dt
+                result['name'] = step_label
+                result['batch'] = batch_label
 
-                self.data[export_id]['create'].append(result)
-
-            if status == 'Created':
-                # start this job...
-                self.execute('start_bulk_job', export_id=export_id, table=table)
-                self.data[export_id]['started'] = datetime.now
+                self.data[export_id]['calls'].append(result)
 
             # set to the next day
             start_dt = step_dt + timedelta(1)
@@ -220,35 +230,166 @@ class MarketoClientBatch(MarketoClient):
 
         # for each job create 
         print('Job Initialized!')
+        return self.data
+
+    def check_batch(self, table = None):
+        self._load_pickle_data()
+        if table is None:
+            table = 'leads'
+
+        if not self.API_MAX_QUEUE:
+            self.API_MAX_QUEUE = 9
+        
+        self.API_QUEUE_COUNT = self.API_MAX_QUEUE
+
+        status = 'Created,Queued,Processing,Cancelled,Completed,Failed'
+        
+        batch_counts = {'Items': 0,
+            'Created': 0,
+            'Queued': 0,
+            'Processing': 0,
+            'Cancelled': 0,
+            'Completed': 0,
+            'Failed': 0,
+            'FileSize': 0,
+            'Rowcount': 0
+        }
+
+        response = self.execute('get_bulk_jobs', table=table, status=status)
+        for result in response:
+            batch_counts['Items'] += 1
+            export_id = result['exportId']
+            if export_id not in self.data:
+                self.data[export_id] = {}
+                self.data[export_id]['status'] = 'Init'
+                self.data[export_id]['calls'] = []
+            
+            if result['status'] in ['Queued','Processing']:
+                self.API_QUEUE_COUNT -= 1
+
+            batch_counts[result['status']] += 1
+
+            if 'status' not in self.data[export_id]:
+                self.data[export_id]['status'] = 'Init'
+
+            if self.data[export_id]['status'] != result['status']:
+                for key in result:
+                    self.data[export_id][key] = result[key]
+
+            if 'fileSize' in result:
+                batch_counts['FileSize'] += result['fileSize']
+            
+            if 'numberOfRecords' in result:
+                batch_counts['Rowcount'] += result['numberOfRecords']   
+
+        self._save_pickle_data()        
+
+        print('\tBatch counts:')
+        for key in batch_counts:
+            print('\t-- {}:\t{}'.format(key, batch_counts[key]))
+        return response        
 
     def process_batch(self, table=None):
         '''
-        this will scan the job queue and the saved jobs to 
-        work out which files are ready to download...
-        '''
-        self._load_pickle_data()
-
-
-    def check_batch(self, table=None):
-        '''
-        This will load the pickle file and compare it
-        to the jobs on Marketo
+        this will start the created jobs...
         '''
         self._load_pickle_data()
         if table is None:
             table = 'leads'
 
-        status = 'Created,Queued,Processing,Cancelled,Completed,Failed'
+        status = 'Created'
+        if not self.API_MAX_QUEUE:
+            self.API_MAX_QUEUE = 10
+        
+        if not self.API_QUEUE_COUNT:
+            self.API_QUEUE_COUNT = self.API_MAX_QUEUE
         
         response = self.execute('get_bulk_jobs', table=table, status=status)
 
-        if 'result' in response:
-            
-            for result in response['result']:
-                print(result)
+        for result in response: #['result']:
+            export_id = result['exportId']
 
-        return response
+            if export_id not in self.data:
+                self.data[export_id] = {}
+                self.data[export_id]['status'] = 'Init'
+                self.data[export_id]['calls'] = []
 
+            if result['status'] == 'Created' and self.API_QUEUE_COUNT > 0:
+                print('starting export: [{}]'.format(export_id))
+                r = self.execute('start_bulk_job', export_id=export_id, table=table)
+                print(r)
+                for key in r[0]:
+                    self.data[export_id][key] = r[0][key]
+
+                self.data[export_id]['calls'].append(r[0])
+                self.API_QUEUE_COUNT -= 1
+
+            if self.API_QUEUE_COUNT <= 0:
+                print('Too many items in the queue...')
+                break
+
+        self._save_pickle_data()
+        return response   
+
+    def download_batch(self, table=None):
+        '''
+        this will download the completed jobs...
+        '''
+        self._load_pickle_data()
+        if table is None:
+            table = 'leads'
+
+        status = 'Completed'
+        
+        response = self.execute('get_bulk_jobs', table=table, status=status)
+        results = []
+        for result in response:
+            export_id = result['exportId']
+            format = result['format'].lower()
+            if result['status'] == 'Completed':
+                if export_id not in self.data:
+                    self.data[export_id] = {}
+                    self.data[export_id]['status'] = 'Completed'
+                    self.data[export_id]['calls'] = []
+
+                file_name = '{}.{}'.format(export_id, format)
+                    
+                if 'filename' not in self.data[export_id] and not os.path.exists(file_name):
+                    print('fetching {} -> {}'.format(export_id, format))
+                    r = self.retrieve_bulk_job(export_id=export_id, format=format, table=table)
+                    for key in r:
+                        result[key] = r[key]
+                        self.data[export_id][key] = r[key]
+                    results.append(result)
+                    self.data[export_id]['calls'].append(r)
+
+        self._save_pickle_data()      
+
+        return results
+
+    def cancel_batch(self, table= None, batch_label = None, step_label = None):
+        self._load_pickle_data()
+        if table is None:
+            table = 'leads'
+
+        export_ids = {}
+
+        if batch_label is not None:
+            pass
+
+        if step_label is not None:
+            pass
+
+        status = 'Created,Queued,Processing'
+        response = self.execute('get_bulk_jobs', table=table, status=status)
+        results = []
+        for result in response:
+            export_id = result['exportId']
+            resp = self.execute('cancel_bulk_job', export_id = export_id, table=table)
+            results.extend(resp)
+        
+        return results
+                
     # --------- BULK EXTRACT ---------
     def create_bulk_extract(self, table=None, fields=None, filter=None, format=None, column_header=None):
         self.authenticate()
@@ -314,10 +455,9 @@ class MarketoClientBatch(MarketoClient):
         if table is None:
             table = 'leads'
         result = self._api_call('post', self.host + "/bulk/v1/" + table + "/export/" + export_id + "/enqueue.json", args)
-        if result is None: raise Exception("Empty Response")
         if not result['success'] : raise MarketoException(result['errors'][0])
         return result['result']
-
+        
     def status_bulk_job(self, export_id, table=None):
         self.authenticate()
         if export_id is None: raise ValueError("Required argument 'exportId' is none.")
@@ -331,18 +471,20 @@ class MarketoClientBatch(MarketoClient):
         if not result['success'] : raise MarketoException(result['errors'][0])
         return result['result']
 
-    def retrieve_bulk_job(self, export_id, table=None):
+    def retrieve_bulk_job(self, export_id, format=None, table=None):
         self.authenticate()
         if export_id is None: raise ValueError("Required argument 'exportId' is none.")
-        args = {
-            'access_token': self.token
-        }
         if table is None:
             table = 'leads'
-        result = self._api_call('get', self.host + "/bulk/v1/" + table + "/export/" + export_id + "/file.json", args)
-        if result is None: raise Exception("Empty Response")
-        if not result['success'] : raise MarketoException(result['errors'][0])
-        return result['result']
+        if format is None:
+            format = 'csv'
+
+        url = self.host + "/bulk/v1/" + table + "/export/" + export_id + "/file.json?access_token=" + self.token
+        file_name = '{}.{}'.format(export_id, format)
+        result = {'filename': file_name, 'url': url, 'size': 0}
+        result['size'] = self._download_file(url, file_name)
+        result['success'] = True
+        return result
 
     def cancel_bulk_job(self, export_id, table=None):
         self.authenticate()
@@ -352,7 +494,7 @@ class MarketoClientBatch(MarketoClient):
         }
         if table is None:
             table = 'leads'
-        result = self._api_call('get', self.host + "/bulk/v1/" + table + "/export/" + export_id + "/cancel.json", args)
+        result = self._api_call('post', self.host + "/bulk/v1/" + table + "/export/" + export_id + "/cancel.json", args)
         if result is None: raise Exception("Empty Response")
         if not result['success'] : raise MarketoException(result['errors'][0])
         return result['result']
