@@ -177,7 +177,7 @@ class MarketoClientBatch(MarketoClient):
             if step_dt > end_dt:
                 step_dt = end_dt
 
-            step_label = '{}:{}:{}'.format(table.lower(), start_dt.date(), step_dt.date())
+            step_label = '{}:{}:{}'.format(table.lower(), start_dt.strftime("%Y-%m-%d"), step_dt.strftime("%Y-%m-%d"))
 
             if step_label in self.data['batches']:
                 print('Skipping already requested....')
