@@ -218,8 +218,8 @@ class MarketoClientBatch(MarketoClient):
 
                 result['startAt'] = start_dt
                 result['endAt'] = step_dt
-                result['name'] = step_label
-                result['batch'] = batch_label
+                self.data[export_id]['name'] = step_label
+                self.data[export_id]['batch'] = batch_label
 
                 self.data[export_id]['calls'].append(result)
 
