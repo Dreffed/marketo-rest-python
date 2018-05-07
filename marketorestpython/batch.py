@@ -238,7 +238,7 @@ class MarketoClientBatch(MarketoClient):
             table = 'leads'
 
         if not self.API_MAX_QUEUE:
-            self.API_MAX_QUEUE = 9
+            self.API_MAX_QUEUE = 10
         
         self.API_QUEUE_COUNT = self.API_MAX_QUEUE
 
@@ -316,8 +316,17 @@ class MarketoClientBatch(MarketoClient):
 
             if result['status'] == 'Created' and self.API_QUEUE_COUNT > 0:
                 print('starting export: [{}]'.format(export_id))
-                r = self.execute('start_bulk_job', export_id=export_id, table=table)
-                print(r)
+                try:
+                    r = self.execute('start_bulk_job', export_id=export_id, table=table)
+                except MarketoException:
+                    print('Marketo: unable to start bulk jobs.')
+                    self.API_QUEUE_COUNT = 0
+                    break
+                except:
+                    print('Some thing else went wrong!')
+                    self.API_QUEUE_COUNT = 0
+                    break
+
                 for key in r[0]:
                     self.data[export_id][key] = r[0][key]
 
