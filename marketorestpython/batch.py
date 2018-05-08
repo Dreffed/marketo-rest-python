@@ -14,7 +14,8 @@ from marketorestpython.helper.exceptions import MarketoException
 xstr = lambda s: s or ''
 
 class MarketoClientBatch(MarketoClient):
-    def __init__(self, munchkin_id, client_id, client_secret, api_limit=None, api_size_limit=None, api_days_max=None):
+    def __init__(self, munchkin_id, client_id, client_secret, 
+                api_limit=None, api_size_limit=None, api_days_max=None):
         super(MarketoClientBatch, self).__init__(munchkin_id, client_id, client_secret, api_limit)
 
         # init the batch frameworks...
@@ -380,8 +381,6 @@ class MarketoClientBatch(MarketoClient):
         self._load_pickle_data()
         if table is None:
             table = 'leads'
-
-        export_ids = {}
 
         if batch_label is not None:
             pass
