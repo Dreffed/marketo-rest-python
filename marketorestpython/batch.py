@@ -194,7 +194,6 @@ class MarketoClientBatch(MarketoClient):
                 'end': step_dt,
                 'filter': filter
             }
-            print(filter)
             
             response = self.execute('create_bulk_extract', table=table, filter=filter, fields=fields)
 
